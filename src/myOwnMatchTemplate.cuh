@@ -3,6 +3,7 @@
 
 #include <cuda.h>
 #include <cufft.h>
+#include <stdio.h>
 #include <cuda_runtime.h>
 
 typedef float2 fComplex;
@@ -61,44 +62,39 @@ __global__ void sqrIntegralKernelPass2(int batch_size, int image_width, int imag
 	}
 }
 
-// inline __device__ void mulAndScale(fComplex &a, const fComplex &b, const float &c) {
-//     fComplex t = {c *(a.x * b.x - a.y * b.y), c *(a.y * b.x + a.x * b.y)};
-//     a = t;
-// }
+inline __device__ void mulAndScale(fComplex &a, const fComplex &b, const float &c) {
+    fComplex t = {c *(a.x * b.x - a.y * b.y), c *(a.y * b.x + a.x * b.y)};
+    a = t;
+}
 
-// __global__ void modulateAndNormalize_kernel(fComplex *d_Dst, fComplex *d_Src, int dataSize, float c) {
-//     const int i = blockDim.x * blockIdx.x + threadIdx.x;
+__global__ void modulateAndNormalize_kernel(fComplex *d_Dst, fComplex *d_Src1, fComplex *d_Src2, int total_rows, int pitch1, float c) {
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
 
-//     if (i >= dataSize) {
-//         return;
-//     }
+    if (i >= total_rows) {
+        return;
+    }
 
-//     fComplex a = d_Src[i];
-//     fComplex b = d_Dst[i];
+    for(int w = 0; w < pitch1; w++){ //pitch1 is in fComplex unit (2 * 4B)
+    	int index = i * pitch1 + w;
+	    fComplex a = d_Src1[index];
+	    fComplex b = d_Src2[index];
 
-//     mulAndScale(a, b, c);
+		// if(i == 0 && w > pitch1 - 3){
+		// 	printf("a = %.3f + %.3fi, b = %.3f + %.3fi\n", a.x, a.y, b.x, b.y);
+		// }
 
-//     d_Dst[i] = a;
-// }
+	    mulAndScale(a, b, c);
+	    d_Dst[index] = a;
+	}
+}
 
-// void modulateAndNormalize(fComplex *d_Dst, fComplex *d_Src, int fftH, int fftW, int padding) {
-//     assert(fftW % 2 == 0);
-//     const int dataSize = fftH * (fftW / 2 + padding);
+void check(int r){
+	if(r != 0){
+		printf("check failed!\n");
+	}
+}
 
-//     modulateAndNormalize_kernel<<<updiv(dataSize, 256), 256>>>(d_Dst, d_Src, dataSize, 1.0f / (float)(fftW *fftH));
-//     //getLastCudaError("modulateAndNormalize() execution failed\n");
-// }
-
-// void check(int r){
-// 	if(r != 0){
-// 		printf("check failed!\n");
-// 	}
-// }
-
-// void myOwnMatchTemplate(int batch_size, int num_template, int image_width, int image_height,
-// 	                    float* d_batch_images, float* d_all_templates, 
-// 	                    int* d_templ_height, int* d_templ_width, 
-//                         float* d_convoluted, float* d_integral_img, float* d_templ_sqsum, float* d_scores){
+void test(){
 
 // 	//d_scores:		 	[w * h * num_templ * batch_size]
 //     //d_templ_sqsum: 	[num_templ] 
@@ -148,73 +144,90 @@ __global__ void sqrIntegralKernelPass2(int batch_size, int image_width, int imag
 // 	//(done outside)
 
 // 	//3. convolution
-// 	cufftHandle fftPlanFwd, fftPlanInv;
-// 	float* h_Kernel, *h_ResultGPU;
-// 	float* d_Kernel;
+	cufftHandle fftPlanFwd, fftPlanInv;
+	int kernelH = 4;
+	int kernelW = 8;
+	float* h_temp, *h_temp_spec, *h_image, *h_image_spec, *h_spec_mul, *h_conv;
+	float* d_temp, *d_temp_spec, *d_image, *d_image_spec, *d_spec_mul, *d_conv;
+
 // 	fComplex* d_DataSpectrum, *d_KernelSpectrum;
 
 // 	int kernelH = 4, kernelW = 2;
 // 	const int fftH = image_height + kernelH - 1;
 //     const int fftW = image_width + kernelW - 1;
 	
-// 	h_Kernel    = (float *)malloc(kernelH * kernelW * sizeof(float));
-//     h_ResultGPU = (float *)malloc(fftH    * fftW * sizeof(fComplex));
-// 	cudaMalloc(&d_Kernel, kernelH * kernelW * sizeof(float));
-// 	cudaMalloc(&d_DataSpectrum,   fftH * (fftW / 2 + 1) * sizeof(fComplex));
-//     cudaMalloc(&d_KernelSpectrum, 4 * (2 / 2 + 1) * sizeof(fComplex));
+	h_temp       = (float *)malloc(kernelH * kernelW * sizeof(float));
+    h_temp_spec  = (float *)malloc(kernelH * (kernelW/2+1) * sizeof(fComplex));
+    h_image      = (float *)malloc(kernelH * kernelW * sizeof(float));
+    h_image_spec = (float *)malloc(kernelH * (kernelW/2+1) * sizeof(fComplex));
+    h_spec_mul   = (float *)malloc(kernelH * (kernelW/2+1) * sizeof(fComplex));
+    h_conv       = (float *)malloc(kernelH * kernelW * sizeof(float));
 
-// 	printf("...creating R2C & C2R FFT plans for %i x %i\n", fftH, fftW);
+ 	cudaMalloc(&d_temp, 		kernelH * kernelW * sizeof(float));
+ 	cudaMalloc(&d_temp_spec, 	kernelH * (kernelW/2+1) * sizeof(fComplex));
+ 	cudaMalloc(&d_image, 		kernelH * kernelW * sizeof(float));
+ 	cudaMalloc(&d_image_spec, 	kernelH * (kernelW/2+1) * sizeof(fComplex));
+ 	cudaMalloc(&d_spec_mul, 	kernelH * (kernelW/2+1) * sizeof(fComplex));
+ 	cudaMalloc(&d_conv, 		kernelH * kernelW * sizeof(float));
 	
-//     check(cufftPlan2d(&fftPlanFwd, kernelH, kernelW, CUFFT_R2C));
-//     check(cufftPlan2d(&fftPlanInv, kernelH, kernelW, CUFFT_C2R));
+    check(cufftPlan2d(&fftPlanFwd, kernelH, kernelW, CUFFT_R2C));
+    check(cufftPlan2d(&fftPlanInv, kernelH, kernelW, CUFFT_C2R));
 
-//     float temp[9] = {3, 5, 2, 1, 8, 9, 2, 3, 0};
-//     for (int i = 0; i < kernelH * kernelW; i++) {
-//         h_Kernel[i] = temp[i];
-//     }
-//     cudaError_t R = cudaMemcpy(d_Kernel, h_Kernel, kernelH * kernelW * sizeof(float), cudaMemcpyHostToDevice);
-//     if (R != cudaSuccess) {
-//     	printf("cudaMemcpy not success!\n");
-//     }
+    float temp[32] = {3, 5, 9, 2, 2, 0, 0, 0,
+    	              8, 9, 1, 4, 9, 0, 0, 0, 
+    	              0, 0, 0, 0, 0, 0, 0, 0,
+    	              0, 0, 0, 0, 0, 0, 0, 0};
 
-//     //check(cufftExecR2C(fftPlanFwd, (cufftReal *)d_batch_images, (cufftComplex *)d_DataSpectrum));
-//     check(cufftExecR2C(fftPlanFwd, (cufftReal *)d_Kernel, (cufftComplex *)d_KernelSpectrum));
+    float image[32] = {100, 50, 12, 24, 0, 0, 0, 0, 
+    	                40, 90, 98, 63, 0, 0, 0, 0,
+    	                20, 15, 17, 29, 0, 0, 0, 0,
+    	            	 0,  0,  0,  0, 0, 0, 0, 0};
 
-//     cudaMemcpy(h_ResultGPU, d_Kernel, kernelH * kernelW * sizeof(float), cudaMemcpyDeviceToHost);
-//     for(int i = 0; i < kernelH * kernelW; i++){
-//     	printf("%f ", h_ResultGPU[i]);
-//     }
-//     printf("\n");
-//     cudaMemcpy(h_ResultGPU, d_KernelSpectrum, kernelH * (kernelW/2+1) * sizeof(fComplex), cudaMemcpyDeviceToHost);
-//     for(int i = 0; i < kernelH * (kernelW/2+1); i++){
-//     	printf("%f ", h_ResultGPU[i]);
-//     }
-//     printf("\n");
-//     cufftExecC2R(fftPlanInv, (cufftComplex *)d_KernelSpectrum, (cufftReal *)d_Kernel);
-//     cudaMemcpy(h_ResultGPU, d_Kernel, kernelH * kernelW * sizeof(float), cudaMemcpyDeviceToHost);
-//     for(int i = 0; i < kernelH * kernelW; i++){
-//     	printf("%f ", h_ResultGPU[i]);
-//     }
-//     printf("\n");
+    for (int i = 0; i < kernelH * kernelW; i++) {
+        h_temp[i] = temp[i];
+        h_image[i] = image[i];
+    }
+    cudaMemcpy(d_temp, h_temp, kernelH * kernelW * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_image, h_image, kernelH * kernelW * sizeof(float), cudaMemcpyHostToDevice);
 
-//     //modulateAndNormalize(d_DataSpectrum, d_KernelSpectrum, fftH, fftW, 1);
-//     //check(cufftExecC2R(fftPlanInv, (cufftComplex *)d_DataSpectrum, (cufftReal *)d_convoluted));
+    check(cufftExecR2C(fftPlanFwd, (cufftReal *)d_temp, (cufftComplex *)d_temp_spec));
+    check(cufftExecR2C(fftPlanFwd, (cufftReal *)d_image, (cufftComplex *)d_image_spec));
 
-//     //cudaMemcpy(h_ResultGPU, d_convoluted, fftH * fftW * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_temp_spec, d_temp_spec, kernelH * (kernelW/2 + 1) * sizeof(fComplex), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_image_spec, d_image_spec, kernelH * (kernelW/2 + 1) * sizeof(fComplex), cudaMemcpyDeviceToHost);
+    
+    printf("temp spec:\n");
+    for(int i = 0; i < kernelH * (kernelW/2+1) * 2; i++){
+    	printf("%f ", h_temp_spec[i]);
+    }
+    printf("\nimage spec:\n");
+    for(int i = 0; i < kernelH * (kernelW/2+1) * 2; i++){
+    	printf("%f ", h_image_spec[i]);
+    }
+    printf("\n");
+    
+    modulateAndNormalize_kernel<<<1,kernelH>>>((fComplex*) d_spec_mul, (fComplex*) d_image_spec, (fComplex*) d_temp_spec, 
+    	                                       kernelH, (kernelW/2)+1, 1.0/float(kernelW*kernelH));
+ 
+    cudaMemcpy(h_spec_mul, d_spec_mul, kernelH * (kernelW/2+1) * sizeof(fComplex), cudaMemcpyDeviceToHost);
+    printf("spec product\n");
+    for(int i = 0; i < kernelH * (kernelW/2+1) * 2; i++){
+    	printf("%f ", h_spec_mul[i]);
+    }
+    printf("\n");
 
-//     //print something
-//     // for(int j=0; j < 10; j++){
-//     //     for(int i=0; i < 40; i++){
-//     //         printf("%d ", int(h_ResultGPU[j*image_width+i]));
-//     //     }
-//     //     printf("\n");
-//     // }
-//     // printf("\n");
+	check(cufftExecC2R(fftPlanInv, (cufftComplex *)d_spec_mul, (cufftReal *)d_conv));
+	cudaMemcpy(h_conv, d_conv, kernelW * kernelH * sizeof(float), cudaMemcpyDeviceToHost);
+    printf("conv result:\n");
+    for(int i = 0; i < kernelH * kernelW; i++){
+        printf("%f ", h_conv[i]);
+    }
+    printf("\n");
 
 // 	//4. SSD_NORMED
 
 // 	//5. maximum location
 // 	cudaDeviceSynchronize();
-// }
+}
 
 #endif

@@ -62,7 +62,7 @@ int main(int argc, char *argv[]) {
     startTime = CycleTimer::currentSeconds();
     w.run();
     endTime = CycleTimer::currentSeconds();
-    printf("Time: Worker run: %f s\n", (endTime - startTime));
+    printf("Time: Worker run: %f s, average %f per image.\n", (endTime - startTime), (endTime - startTime)/w.get_batch_size());
 
     return 0;
 }

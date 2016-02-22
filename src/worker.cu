@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <stdio.h>
 #include "worker.h"
 #include "util/CycleTimer.h"
 #include "myOwnMatchTemplate.cuh"
@@ -15,7 +16,7 @@ int updiv(int a, int b){
 Worker::Worker(char *argv[]) {
     //set device id first
     startTime = CycleTimer::currentSeconds();
-    cudaSetDevice(2); //speed reply on system memory?
+    cudaSetDevice(0); //speed reply on system memory?
     cudaDeviceSynchronize();
     endTime = CycleTimer::currentSeconds();
     printf("Time for setID: %f sec.\n", endTime-startTime);
@@ -50,7 +51,7 @@ Worker::Worker(char *argv[]) {
     h_templates = new float [padded_height * padded_width];
     // temp space
     cudaMalloc(&d_templates, padded_height * padded_width * sizeof(float));    GPU_MEM += padded_height * padded_width * sizeof(float);
-    //h_all_templates_spectrum = new float [2 * num_template * padded_height * (padded_width/2 + 1)];
+    h_all_templates_spectrum = new float [2 * num_template * padded_height * (padded_width/2 + 1)];
     cudaMalloc(&d_all_templates_spectrum, num_template * padded_height * (padded_width/2 + 1) * sizeof(fComplex));
                                                                                 GPU_MEM += num_template * padded_height * (padded_width/2 + 1) * sizeof(fComplex);
     // ii) for image
@@ -59,8 +60,14 @@ Worker::Worker(char *argv[]) {
     cudaMalloc(&d_batch_images_spectrum, batch_image_size * padded_height * (padded_width/2 + 1) * sizeof(fComplex));       GPU_MEM += batch_image_size * padded_height * (padded_width/2 + 1) * sizeof(fComplex);
     h_batch_images_spectrum = new float [2 * batch_image_size * padded_height * (padded_width/2 + 1)];
 
-    cufftPlan2d(&fftPlanFwd, padded_width, padded_height, CUFFT_R2C);
-    cufftPlan2d(&fftPlanInv, padded_width, padded_height, CUFFT_C2R);
+    // iii) for convoluted spectrum and image (same as # of template, shared by every image
+    h_mul_spectrum = new float [2 * num_template * padded_height * (padded_width/2 + 1)];
+    cudaMalloc(&d_mul_spectrum, num_template * padded_height * (padded_width/2 + 1) * sizeof(fComplex)); GPU_MEM += num_template * padded_height * (padded_width/2 + 1) * sizeof(fComplex);
+    cudaMalloc(&d_convolved, num_template * padded_height * padded_width * sizeof(float));               GPU_MEM += num_template * padded_height * padded_width * sizeof(float);
+    h_convolved = new float [num_template * padded_height * padded_width];
+
+    cufftPlan2d(&fftPlanFwd, padded_height, padded_width, CUFFT_R2C); // note the order here !!!!!
+    cufftPlan2d(&fftPlanInv, padded_height, padded_width, CUFFT_C2R);
 
     printf("Allocate %f MBytes\n", GPU_MEM/1e6);
 }
@@ -86,21 +93,13 @@ Worker::~Worker(){
 }
 
 void Worker::run(){
-  
-  //printf("%sGot in run()\n" ANSI_COLOR_RESET "\n", color_string);
-    for(int gpu = 0; gpu < 1; gpu++){
-        //on GPU we have to keep: 1)templates, 2)images, 3)template sizes
-        //and intermediate stuff: 4)d_scores, 5)template sq sum, 6)integral maps, 7)convoluted maps
-        makeTemplateReady(); // load template, keep sq sum, keep spectrum
-        makeImageReady();
-
-        // myOwnMatchTemplate(batch_image_size, num_template, image_width, image_height,
-        //                   d_batch_images, d_all_templates, d_templ_height, d_templ_width, 
-        //                   d_convoluted, d_integral_img, d_templ_sqsum, d_scores);
-    }
+    //test();
+    // for(int gpu = 0; gpu < 1; gpu++){
+         makeTemplateReady(); // load template, keep sq sum, keep spectrum
+         makeImageReady(); //keep spectrum, then keep sqIntegral image (in place) 
+         matchTemplate();
+    // }
 }
-
-
 
 void Worker::makeTemplateReady(){
     // Goal: keep sq sum, keep spectrum
@@ -187,11 +186,13 @@ void Worker::makeTemplateReady(){
     printf("Template done, avg %f sec per template\n", (endTime - startTime) / num_template);
 
     //verify d_all_templates_spectrum
-    // cudaMemcpy(h_all_templates_spectrum, d_all_templates_spectrum, 
-    //            num_template * padded_height * (padded_width/2 + 1) * 2, cudaMemcpyDeviceToHost);
-    // for(int c = 0; c < 2; c++) {
-    //     for(int i = 0; i < 10; i++){
-    //         printf("%.2f ", h_all_templates_spectrum[c*pitch2_half*2 + i]);
+    // cudaMemcpy(h_all_templates_spectrum, d_all_templates_spectrum,
+    //            num_template * padded_height * (padded_width/2 + 1) * sizeof(fComplex), cudaMemcpyDeviceToHost);
+    // printf("Template spectrum:\n");
+    // for(int c = 0; c < 1; c++) {
+    //     for(int i = 0; i < (padded_width/2 + 1)*2; i++){
+    //         printf("%.4e ", h_all_templates_spectrum[c*pitch2_half*2 + i]);
+    //         //if(i % 2) printf(" | ");
     //     }
     //     printf("\n\n");
     // }
@@ -207,7 +208,7 @@ void Worker::makeImageReady(){
     int pitch1 = padded_width;
     for(int c = 0; c < batch_image_size; c++){
         sprintf(filename, image_name.c_str(), c);
-        //if(c < 2) {printf("Processing image %d, %s\n", c, filename); fflush(stdout);}
+        if(c == 0) {printf("Processing image %d, %s\n", c, filename); fflush(stdout);}
         Mat img = imread(filename, 0); //gray scale image!
         for(int j = 0; j < img.rows; j++){
             for(int i = 0; i < img.cols; i++){
@@ -243,49 +244,122 @@ void Worker::makeImageReady(){
         assert(result == 0);
     }
     endTime = CycleTimer::currentSeconds();
+    cudaDeviceSynchronize();
     printf("Image spectrum done in %f sec. Avg %f sec per image\n", (endTime - startTime), 
             (endTime - startTime)/batch_image_size);
 
-    // //inspect spectrum
+    //inspect spectrum
     // cudaMemcpy(h_batch_images_spectrum, d_batch_images_spectrum, 
-    //            batch_image_size * padded_height * (padded_width/2 + 1) * 2, cudaMemcpyDeviceToHost);
-    // for(int c = 0; c < 2; c++) {
-    //     for(int i = 0; i < 10; i++){
-    //         printf("%.2f ", h_batch_images_spectrum[c*pitch2_half*2 + i]);
+    //            batch_image_size * padded_height * (padded_width/2 + 1) * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    // printf("Image spectrum:\n");
+    // for(int c = 1; c < 2; c++) {
+    //     for(int i = 0; i < (padded_width/2 + 1)*2; i++){
+    //         printf("%.3e ", h_batch_images_spectrum[c*pitch2_half*2 + i]);
+    //         //if(i % 2) printf(" | ");
     //     }
     //     printf("\n\n");
     // }
     
     //integral images in place
-    
+    startTime = CycleTimer::currentSeconds();
     int total_rows = image_height * batch_image_size; //300 * 128
     int total_cols = image_width * batch_image_size;  //426 * 128
     int numBlocks = updiv(total_rows, numThreadsPerBlock);
     printf("Launching sqrIntegralKernelPass1<<<%d, %d>>>\n", numBlocks, numThreadsPerBlock);
     sqrIntegralKernelPass1<<<numBlocks, numThreadsPerBlock>>>(batch_image_size, image_width, image_height, padded_width, padded_height, d_batch_images);
 
-    size = padded_height * padded_width * batch_image_size;
-    float* h_integral_img_debug = new float[size];
-       cudaMemcpy(h_integral_img_debug, d_batch_images, size * sizeof(float), cudaMemcpyDeviceToHost);
+    // size = padded_height * padded_width * batch_image_size;
+    // float* h_integral_img_debug = new float[size];
+    // cudaMemcpy(h_integral_img_debug, d_batch_images, size * sizeof(float), cudaMemcpyDeviceToHost);
 
-       for(int j=0; j < 10; j++){
-           for(int i=0; i < 40; i++){
-               printf("%d ", int(h_integral_img_debug[j*padded_width+i])%10);
-           }
-           printf("\n");
-       }
-       printf("\n");
+    // for(int j=0; j < 10; j++){
+    //    for(int i=0; i < 1024; i++){
+    //        printf("%d ", int(h_integral_img_debug[j*padded_width+i])%10);
+    //    }
+    //    printf("\n");
+    // }
+    // printf("\n");
 
     numBlocks = updiv(total_cols, numThreadsPerBlock);
     printf("Launching sqrIntegralKernelPass2<<<%d, %d>>>\n", numBlocks, numThreadsPerBlock);
     sqrIntegralKernelPass2<<<numBlocks, numThreadsPerBlock>>>(batch_image_size, image_width, image_height, padded_width, padded_height, d_batch_images);
-
-    cudaMemcpy(h_integral_img_debug, d_batch_images, size * sizeof(float), cudaMemcpyDeviceToHost);
-    for(int j=0; j < 10; j++){
-           for(int i=0; i < 40; i++){
-               printf("%d ", int(h_integral_img_debug[j*padded_width+i])%10);
-           }
-           printf("\n");
-       }
-       printf("\n");
+    cudaDeviceSynchronize();
+    endTime = CycleTimer::currentSeconds();
+    printf("Integral image done in %f sec. Avg %f sec per image\n", (endTime - startTime), 
+            (endTime - startTime)/batch_image_size);
+    // cudaMemcpy(h_integral_img_debug, d_batch_images, size * sizeof(float), cudaMemcpyDeviceToHost);
+    // for(int j=0; j < 10; j++){
+    //     for(int i=0; i < 1024; i++){
+    //         printf("%d ", int(h_integral_img_debug[j*padded_width+i])%10);
+    //     }
+    //     printf("\n");
+    // }
+    // printf("\n");
 }
+
+void Worker::matchTemplate(){
+    //given spectrum of image and templates, do dot product, ifft2, and find maximum location & score
+
+    //for each image in batch, get convoluted result
+    for(int i = 0; i < 1; i++){
+        modulateAndNormalize(i);
+        getConvolved(i);
+    }
+}
+
+void Worker::modulateAndNormalize(int image_index) {
+    //assert(fftW % 2 == 0);
+    //d_mul_spectrum = d_all_templates_spectrum(image_index) .* d_batch_images_spectrum
+    int pitch1 = padded_width / 2 + 1;
+    int pitch2 = padded_height * (padded_width / 2 + 1);
+    const int total_rows = num_template * padded_height;
+    //printf("total_rows = %d\n", total_rows);
+
+    //printf("Launching modulateAndNormalize_kernel<<<%d, %d>>>\n", updiv(total_rows, numThreadsPerBlock), numThreadsPerBlock);
+    modulateAndNormalize_kernel<<<updiv(total_rows, numThreadsPerBlock), numThreadsPerBlock>>>
+                 ((fComplex*) d_mul_spectrum, 
+                  (fComplex*) d_all_templates_spectrum, 
+                  (fComplex*) (d_batch_images_spectrum + (2 * pitch2 * image_index)), 
+                  total_rows, pitch1, 1.0f / (float)(padded_height * padded_width));
+    //cudaDeviceSynchronize();
+
+    // //verify
+    //cudaMemcpy(h_mul_spectrum, d_mul_spectrum, num_template * padded_height * (padded_width/2 + 1) * 2 * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // printf("spectrum product (first line):\n");
+    // for(int c = 0; c < 1; c++){
+    //     for(int i = 0; i < padded_height * (padded_width/2 + 1) * 2; i++){
+    //         printf("%.3e ", h_mul_spectrum[c * padded_height * (padded_width / 2 + 1) * 2 + i]);
+    //     }
+    //     printf("\n");
+    // }
+}
+
+void Worker::getConvolved(int image_index){
+    //d_mul_spectrum           in   num_template * padded_height * (padded_width/2 + 1) (fComplex)
+    //d_all_templates_spectrum in   num_template * padded_height * padded_width         (float)
+    int pitch2_half = padded_height * (padded_width/2 + 1);
+    int pitch2 = padded_height * padded_width;
+    //int pitch1 = padded_width;
+
+    for(int t = 0; t < 1; t++){
+        cufftResult result = cufftExecC2R(fftPlanInv, (cufftComplex *)(d_mul_spectrum + t * pitch2_half * 2), 
+                 (cufftReal *)(d_convolved + t * pitch2));
+        assert(result == 0);
+    }
+
+    // verify
+    // printf("convolved result:\n");
+    // cudaMemcpy(h_convolved, d_convolved, num_template * padded_height * padded_width * sizeof(float), cudaMemcpyDeviceToHost);
+    // for(int c = 0; c < 1; c++){
+    //     for(int i = 0; i < 20; i++){
+    //         for(int j = 0; j < 10; j++){
+    //             printf("%.4e ", h_convolved[c * pitch2 + i * pitch1 + j]);
+    //         }
+    //         printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+}
+
+

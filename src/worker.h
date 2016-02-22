@@ -19,10 +19,15 @@ class Worker {
 		//Worker();
 		//void setupWorker(char *argv[]);
 		void run();
+		int get_batch_size() {return batch_image_size;}
 
 	private:
 		void makeTemplateReady(); //sync call!
 		void makeImageReady();
+
+		void matchTemplate();
+		void modulateAndNormalize(int image_index);
+		void getConvolved(int image_index);
 	    
 	    vector<float> score;
 		vector<Point> position;
@@ -33,9 +38,9 @@ class Worker {
 		const int num_template = 96;// hard coded now. should be dynamically determined by looking into template file list
 		const int padded_width = 1024; // should be larger than image + template - 1
 		const int padded_height = 512;
-		const int batch_image_size = 128;
 		const int image_width = 426;
 	    const int image_height = 300;
+	    const int batch_image_size = 1024;
 
 		//things to be set by setupWorker()
 		string template_list;
@@ -53,12 +58,14 @@ class Worker {
 	    int* h_templ_height;			int* d_templ_height;
 	    float* h_templates;				float* d_templates; // temp space
 	    float* h_templ_sqsum;			float* d_templ_sqsum;
-	    //float* h_all_templates_spectrum;
+	    float* h_all_templates_spectrum;
 	    								float* d_all_templates_spectrum;
 	   	
 	   	float* h_batch_images;			float* d_batch_images;
 	   	float* h_batch_images_spectrum;	float* d_batch_images_spectrum;
 
+	   	float* h_mul_spectrum;			float* d_mul_spectrum;
+	   	float* h_convolved;				float* d_convolved;
 
 	   	//fftplans
 	   	cufftHandle fftPlanFwd;
