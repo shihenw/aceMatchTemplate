@@ -28,6 +28,8 @@ class Worker {
 		void matchTemplate();
 		void modulateAndNormalize(int image_index);
 		void getConvolved(int image_index);
+		void getScoreMap(int image_index);
+		void findMinLoc(int image_index);
 	    
 	    vector<float> score;
 		vector<Point> position;
@@ -40,7 +42,7 @@ class Worker {
 		const int padded_height = 512;
 		const int image_width = 426;
 	    const int image_height = 300;
-	    const int batch_image_size = 1024;
+	    const int batch_image_size = 512;
 
 		//things to be set by setupWorker()
 		string template_list;
@@ -54,18 +56,24 @@ class Worker {
 	    int device_order;
 
 	    //data pointers
-	    int* h_templ_width;     		int* d_templ_width;
-	    int* h_templ_height;			int* d_templ_height;
-	    float* h_templates;				float* d_templates; // temp space
-	    float* h_templ_sqsum;			float* d_templ_sqsum;
-	    float* h_all_templates_spectrum;
-	    								float* d_all_templates_spectrum;
+	    int* h_templ_width;     			int* d_templ_width;
+	    int* h_templ_height;				int* d_templ_height;
+	    double* h_templates;				double* d_templates; // temp space
+	    double* h_templ_sqsum;				double* d_templ_sqsum;
+	    double* h_all_templates_spectrum;	double* d_all_templates_spectrum;
 	   	
-	   	float* h_batch_images;			float* d_batch_images;
-	   	float* h_batch_images_spectrum;	float* d_batch_images_spectrum;
+	   	double* h_batch_images;				double* d_batch_images;
+	   	double* h_batch_images_spectrum;	double* d_batch_images_spectrum;
 
-	   	float* h_mul_spectrum;			float* d_mul_spectrum;
-	   	float* h_convolved;				float* d_convolved;
+	   	double* h_mul_spectrum;				double* d_mul_spectrum;
+	   	double* h_convolved;				double* d_convolved;
+
+	   	double* h_scoreMap;					double* d_scoreMap;
+
+	   	//results
+	   	double* h_minval;					double* d_minval; 
+	   	int* h_argmin_x;					int* d_argmin_x;
+	   	int* h_argmin_y; 					int* d_argmin_y;
 
 	   	//fftplans
 	   	cufftHandle fftPlanFwd;

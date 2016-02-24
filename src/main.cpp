@@ -94,7 +94,7 @@ void printCudaInfo() {
     // for fun, just print out some stats on the machine
 
     int deviceCount = 0;
-    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+    cudaGetDeviceCount(&deviceCount);
 
     printf("---------------------------------------------------------\n");
     printf("Found %d CUDA devices\n", deviceCount);
