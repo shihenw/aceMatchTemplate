@@ -257,7 +257,7 @@ __global__ void rowReduceMin_kernel(double* d_scoreMap, int* d_templ_width, int*
 __global__ void columnReduceMin_kernel(double* d_scoreMap, int* d_templ_width, int* d_templ_height, 
 									double* d_minval, int* d_argmin_x, int* d_argmin_y,
 	                                int num_template, int padded_width, int padded_height, 
-	                                int image_width, int image_height){
+	                                int image_width, int image_height, int image_index){
 	//256 threads per template
 	const int i = blockDim.x * blockIdx.x + threadIdx.x; //global thread id
 	int duty_template = i >> 5; //i / 32;
@@ -330,9 +330,9 @@ __global__ void columnReduceMin_kernel(double* d_scoreMap, int* d_templ_width, i
 	    		col_xargmin[warp_id][offset] = col_xargmin[warp_id][offset+16];
 	    		col_yargmin[warp_id][offset] = col_yargmin[warp_id][offset+16];
 	    	}
-	    	d_minval[duty_template] = col_minVals[warp_id][0];
-	    	d_argmin_x[duty_template] = col_xargmin[warp_id][0];
-	    	d_argmin_y[duty_template] = col_yargmin[warp_id][0];
+	    	d_minval[image_index * num_template + duty_template] = col_minVals[warp_id][0];
+	    	d_argmin_x[image_index * num_template + duty_template] = col_xargmin[warp_id][0];
+	    	d_argmin_y[image_index * num_template + duty_template] = col_yargmin[warp_id][0];
 	    }
 	}
 }
@@ -344,7 +344,6 @@ void check(int r){
 }
 
 void test(){
-
 	cufftHandle fftPlanFwd, fftPlanInv;
 	int kernelH = 4;
 	int kernelW = 8;

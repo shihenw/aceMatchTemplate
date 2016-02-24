@@ -31,6 +31,7 @@ default: $(EXECUTABLE)
 #	$(CC)  -o c1413_cuda 1413_cuda.cu $(CFLAG)
 dirs:
 		mkdir -p $(OBJDIR)/
+		mkdir -p results/
 
 clean:
 		rm -rf $(OBJDIR) *~ $(EXECUTABLE)

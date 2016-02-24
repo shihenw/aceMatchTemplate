@@ -2,9 +2,11 @@
 #include <iostream>
 #include <stdio.h>
 #include <math.h>
+#include <iomanip>
 #include "worker.h"
 #include "util/CycleTimer.h"
 #include "myOwnMatchTemplate.cuh"
+
 
 #define numThreadsPerBlock 256
 
@@ -14,14 +16,14 @@ int updiv(int a, int b){
     return (a+b-1)/b;
 }
 
-Worker::Worker(char *argv[]) {
+Worker::Worker(char *argv[], int gpuid) {
     //set device id first
     startTime = CycleTimer::currentSeconds();
-    cudaSetDevice(0); //speed reply on system memory?
+    cudaSetDevice(gpuid); //speed reply on system memory?
     cudaDeviceSynchronize();
     endTime = CycleTimer::currentSeconds();
     printf("Time for setID: %f sec.\n", endTime-startTime);
-    printf("run: using GPU %d \n", 2);
+    printf("Worker: using GPU %d \n", gpuid);
     fflush(stdout);
 
     // work spec: read from arguments
@@ -34,11 +36,6 @@ Worker::Worker(char *argv[]) {
     device_id = atoi(argv[1]);
     num_devices = atoi(argv[3]);
     device_order = atoi(argv[2]);
-
-    // output
-    score.resize(num_template);
-    position.resize(num_template);
-    template_name.resize(num_template);
 
     //allocate all CUDA memory
     double GPU_MEM = 0;
@@ -72,34 +69,37 @@ Worker::Worker(char *argv[]) {
     cudaMalloc(&d_scoreMap, num_template * padded_height * padded_width * sizeof(double));               GPU_MEM += num_template * padded_height * padded_width * sizeof(double);
 
     // v) for result
-    cudaMalloc(&d_minval,   num_template * sizeof(double));      GPU_MEM += num_template * sizeof(double);
-    cudaMalloc(&d_argmin_x, num_template * sizeof(int));        GPU_MEM += num_template * sizeof(int);
-    cudaMalloc(&d_argmin_y, num_template * sizeof(int));        GPU_MEM += num_template * sizeof(int);
-    h_minval = new double[num_template];
-    h_argmin_y = new int[num_template];
-    h_argmin_x = new int[num_template];
+    cudaMalloc(&d_minval,   batch_image_size * num_template * sizeof(double));     GPU_MEM += batch_image_size * num_template * sizeof(double);
+    cudaMalloc(&d_argmin_x, batch_image_size * num_template * sizeof(int));        GPU_MEM += batch_image_size * num_template * sizeof(int);
+    cudaMalloc(&d_argmin_y, batch_image_size * num_template * sizeof(int));        GPU_MEM += batch_image_size * num_template * sizeof(int);
+    h_minval = new double[batch_image_size * num_template];
+    h_argmin_y = new int[batch_image_size * num_template];
+    h_argmin_x = new int[batch_image_size * num_template];
 
     cufftPlan2d(&fftPlanFwd, padded_height, padded_width, CUFFT_D2Z); // note the order here !!!!!
     cufftPlan2d(&fftPlanInv, padded_height, padded_width, CUFFT_Z2D);
 
-    printf("Allocate %f MBytes\n", GPU_MEM/1e6);
+    printf("Allocate %f MBytes\n", GPU_MEM/(1024*1024));
 }
 
 Worker::~Worker(){
-    delete[] h_templ_sqsum;
-    cudaFree(d_templ_sqsum);
-    cudaFree(d_templ_height);
-    cudaFree(d_templ_width);
-    cudaFree(d_templ_sqsum);
-    delete[] h_templ_height;
-    delete[] h_templ_width;
-    cudaFree(d_templates);
-    delete[] h_templates;
+    
+    cudaFree(d_templ_sqsum);                delete[] h_templ_sqsum;
+    cudaFree(d_templ_height);               delete[] h_templ_height;
+    cudaFree(d_templ_width);                delete[] h_templ_width;
+    cudaFree(d_templates);                  delete[] h_templates;
+    cudaFree(d_all_templates_spectrum);     delete[] h_all_templates_spectrum;
+    
+    delete[] h_batch_images;                cudaFree(d_batch_images);
+    delete[] h_batch_images_spectrum;       cudaFree(d_batch_images_spectrum);
 
-    //delete[] h_batch_images;
-    //cudaFree(d_scores);
-    //cudaFree(d_convoluted); 
-    //cudaFree(d_integral_img);
+    delete[] h_mul_spectrum;                cudaFree(d_mul_spectrum);
+    delete[] h_convolved;                   cudaFree(d_convolved);
+    delete[] h_scoreMap;                    cudaFree(d_scoreMap);
+
+    delete[] h_minval;                      cudaFree(d_minval); 
+    delete[] h_argmin_x;                    cudaFree(d_argmin_x);
+    delete[] h_argmin_y;                    cudaFree(d_argmin_y);
 
     cufftDestroy(fftPlanFwd);
     cufftDestroy(fftPlanInv);
@@ -120,10 +120,9 @@ void Worker::makeTemplateReady(){
     ifstream readtemplist;
     readtemplist.open(template_list.c_str());
     string output;
-    vector<string> temp;
     if (readtemplist.is_open()) {
         while (getline (readtemplist, output)) {
-            temp.push_back(output);
+            template_name.push_back(output);
         }
     }
     readtemplist.close();
@@ -134,8 +133,7 @@ void Worker::makeTemplateReady(){
     // read templates' sizes
     printf("number of template: %d\n", num_template);
     int c = 0, max_width = 0, max_height = 0;
-    for (vector<string>::iterator iter = temp.begin(); iter != temp.end(); ++iter) {
-        string temp_name = "/" + *iter;
+    for (vector<string>::iterator iter = template_name.begin(); iter != template_name.end(); ++iter) {
         Mat templ = imread(template_folder + "/" + (*iter), 0); //gray-scale image!
         h_templ_width[c] = templ.cols;
         h_templ_height[c] = templ.rows;
@@ -155,9 +153,9 @@ void Worker::makeTemplateReady(){
     c = 0;
     
     startTime = CycleTimer::currentSeconds();
-    for (vector<string>::iterator iter = temp.begin(); iter != temp.end(); ++iter) {
-        string temp_name = "/" + *iter;
-        if(c == 14) {printf("Processing template %d, %s\n", c, temp_name.c_str()); fflush(stdout);}
+    for (vector<string>::iterator iter = template_name.begin(); iter != template_name.end(); ++iter) {
+        //string temp_name = "/" + *iter;
+        //printf("Processing template %d, %s\n", c, temp_name.c_str()); fflush(stdout);
         Mat templ = imread(template_folder + "/" + (*iter), CV_LOAD_IMAGE_COLOR); //gray-scale image!
         double sqsum = 0;
         //printf("Processing template %d before for loop\n", c);
@@ -230,8 +228,8 @@ void Worker::makeImageReady(){
     int pitch2_half = padded_height * (padded_width/2 + 1);
     int pitch1 = padded_width;
     for(int c = 0; c < batch_image_size; c++){
-        sprintf(filename, image_name.c_str(), c);
-        if(c == 0) {printf("Processing image %d, %s\n", c, filename); fflush(stdout);}
+        sprintf(filename, image_name.c_str(), c + begin_image_num);
+        //printf("Processing image %d, %s\n", c, filename);
         Mat img = imread(filename, CV_LOAD_IMAGE_COLOR); //gray scale image!
         for(int j = 0; j < img.rows; j++){
             for(int i = 0; i < img.cols; i++){
@@ -357,11 +355,12 @@ void Worker::matchTemplate(){
         //cudaDeviceSynchronize();
         //endTime = CycleTimer::currentSeconds();
         //printf("findMinLoc done in %f sec.\n", (endTime - startTime));
-        //writeIntoDisc
     }
-    
-    
-    //(endTime - startTime)/batch_image_size);
+
+    startTime = CycleTimer::currentSeconds();
+    copyAndWriteResults();
+    endTime = CycleTimer::currentSeconds();
+    printf("Write done in %f sec.\n", (endTime - startTime));
 }
 
 void Worker::modulateAndNormalize(int image_index) {
@@ -479,16 +478,26 @@ void Worker::findMinLoc(int image_index){
     //printf("Launching columnReduceMin_kernel<<<%d,%d>>>\n", updiv(total_threads, numThreadsPerBlock), numThreadsPerBlock);
     columnReduceMin_kernel<<<updiv(total_threads, numThreadsPerBlock), numThreadsPerBlock>>>
                 (d_scoreMap, d_templ_width, d_templ_height, d_minval, d_argmin_x, d_argmin_y,
-                 num_template, padded_width, padded_height, image_width, image_height);
+                 num_template, padded_width, padded_height, image_width, image_height, image_index);
+}
 
-    // if(image_index == 400){
-    //     //verify
-    //     cudaMemcpy(h_minval, d_minval, num_template * sizeof(double), cudaMemcpyDeviceToHost);
-    //     cudaMemcpy(h_argmin_x, d_argmin_x, num_template * sizeof(int), cudaMemcpyDeviceToHost);
-    //     cudaMemcpy(h_argmin_y, d_argmin_y, num_template * sizeof(int), cudaMemcpyDeviceToHost);
+void Worker::copyAndWriteResults() {
 
-    //     for(int i=0;i<num_template;i++){ //num_template;i++){
-    //         printf("template %d: score: %f, x: %d, y: %d\n", i, h_minval[i], h_argmin_x[i], h_argmin_y[i]);
-    //     }
-    // }
+    cudaMemcpy(h_minval, d_minval, batch_image_size * num_template * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_argmin_x, d_argmin_x, batch_image_size * num_template * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_argmin_y, d_argmin_y, batch_image_size * num_template * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i = 0; i < batch_image_size; i++){
+        fstream filea;
+        char filename[200];
+        sprintf(filename, result_filename.c_str(), i + begin_image_num);
+        filea.open(filename, ios::out);
+        for (int t=0; t<num_template; t++){
+            filea << fixed << setprecision(6) << h_minval[i * num_template + t] << "\t" 
+                  << h_argmin_x[i * num_template + t] << "\t"
+                  << h_argmin_y[i * num_template + t] << "\t" 
+                  << template_name[t] << endl;
+        }
+        filea.close();
+    }
 }

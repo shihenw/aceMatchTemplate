@@ -14,7 +14,7 @@ using namespace cv;
 
 class Worker {
 	public:
-		Worker(char *argv[]);
+		Worker(char *argv[], int gpuid);
 		~Worker();
 		//Worker();
 		//void setupWorker(char *argv[]);
@@ -30,9 +30,8 @@ class Worker {
 		void getConvolved(int image_index);
 		void getScoreMap(int image_index);
 		void findMinLoc(int image_index);
+		void copyAndWriteResults();
 	    
-	    vector<float> score;
-		vector<Point> position;
 		vector<string> template_name;
 		//char color_string[] = "\x1b[31m";
 
@@ -42,7 +41,7 @@ class Worker {
 		const int padded_height = 512;
 		const int image_width = 426;
 	    const int image_height = 300;
-	    const int batch_image_size = 512;
+	    const int batch_image_size = 1024;
 
 		//things to be set by setupWorker()
 		string template_list;
@@ -67,7 +66,6 @@ class Worker {
 
 	   	double* h_mul_spectrum;				double* d_mul_spectrum;
 	   	double* h_convolved;				double* d_convolved;
-
 	   	double* h_scoreMap;					double* d_scoreMap;
 
 	   	//results

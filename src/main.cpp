@@ -48,16 +48,16 @@ int main(int argc, char *argv[]) {
     
     double startTime, endTime;// = CycleTimer::currentSeconds();
     //check GPUs
-    printCudaInfo();
-    
-    //printf("Time for allocating CPU global memory: %f sec.\n", color_string, endTime - startTime);
+    int gpuid = atoi(argv[1]);
+    printf("gpu id is %d\n", gpuid);
+    if(gpuid == 0) printCudaInfo();
 
     startTime = CycleTimer::currentSeconds();
-    Worker w(argv);
+    Worker w(argv, gpuid);
     endTime = CycleTimer::currentSeconds();
     printf("Time: Worker constructor: %f s\n", (endTime - startTime));
     
-    printf("0 is %s\n", type2str(0).c_str());
+    //printf("0 is %s\n", type2str(0).c_str());
 
     startTime = CycleTimer::currentSeconds();
     w.run();
